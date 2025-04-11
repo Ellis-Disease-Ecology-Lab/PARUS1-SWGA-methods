@@ -1,0 +1,396 @@
+---
+title: "PARUS1 Methods Statistical Analyses"
+author: "Ellis Lab"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Background
+
+The goals of this analysis include:
+
+* Compare the relative proportions of reads mapping to the parasite between unamplified and amplified samples (the latter including those sequenced with shallow [MiSeq; and three primer sets] and deep [NextSeq 2000; one primer set] sequencing)
+* Evaluate the sequencing depth and breadth of coverage and consistency between samples with the different primer sets in the shallow sequencing and among the samples with primer set 2 that had deep sequencing
+
+The bioinformatics analyses produced the following files that will be analyzed here:
+
+* `/map_stats_parus1_final/01_host_map/host_counts.tsv` Read counts (host genome) over 10kb windows of each sample (duplicates removed, mapping quality of 30 or higher; `deeptools`)
+* `/map_stats_parus1_final/01_host_map/run1/host1_map_mod.tsv` Mapping stats (total mapped reads, mead depth, sd depth, proportion of genome with at least 1X coverage) for host genome from MiSeq run (`samtools` + `awk`)
+* `/map_stats_parus1_final/01_host_map/run2/host2_map_mod.tsv` Mapping stats (total mapped reads, mead depth, sd depth, proportion of genome with at least 1X coverage) for host genome from NextSeq run (`samtools` + `awk`)
+* `/map_stats_parus1_final/02_pathogen_map/path_counts.tsv` Read counts (pathogen genome) over 10kb windows of each sample (duplicates removed, mapping quality of 30 or higher; `deeptools`)
+* `/map_stats_parus1_final/02_pathogen_map/run1/path1_map_mod.tsv` Mapping stats (total mapped reads, mead depth, sd depth, proportion of genome with at least 1X coverage) for pathogen genome from MiSeq run (`samtools` + `awk`)
+* `/map_stats_parus1_final/02_pathogen_map/run2/path2_map_mod.tsv` Mapping stats (total mapped reads, mead depth, sd depth, proportion of genome with at least 1X coverage) for pathogen genome from NextSeq run (`samtools` + `awk`)
+* `/unamplified_parus1/host_map_mod.tsv` Mapping stats (total mapped reads, mead depth, sd depth, proportion of genome with at least 1X coverage) for host genome from unamplified samples Miseq run (`samtools` + `awk`)
+* `/unamplified_parus1/path_map_mod.tsv` Mapping stats (total mapped reads, mead depth, sd depth, proportion of genome with at least 1X coverage) for pathogen genome from unamplified samples Miseq run (`samtools` + `awk`)
+* `/parus1_swga_methods_final/12_host_joint_vcf/host_joint_final.vcf.gz` VCF file of host variant calls from final NextSeq run (`GATK`)
+* `/parus1_swga_methods_final/13_pathogen_joint_vcf/pathogen_joint_final.vcf.gz` VCF file of pathogen variant calls from final NextSeq run (`GATK`)
+* `/total_mapped_reads_parus1/run1/run1_mapped.tsv` Total number of reads that passed QC in run 1
+* `/total_mapped_reads_parus1/run2/run2_mapped.tsv` Total number of reads that passed QC in run 2
+* `/total_mapped_reads_parus1/unamp/unamp_mapped.tsv` Total number of reads that passed QC in the unamplified run
+
+### Compare relative proportions of pathogen reads
+
+First compare shallow and deep sequencing for primer set 2 samples (exclude negative controls).
+```{r, warning=FALSE, message=FALSE}
+## set working directory
+setwd("C:/Users/vaellis/OneDrive - University of Delaware - o365/Documents/Ellis_Lab/Research/Malaria/SWGA/PARUS1 Methods Paper")
+
+## packages
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(writexl)
+
+## read files re: mapping stats; add identifier columns to each file
+host1 <- read_tsv("map_stats_parus1_final/01_host_map/run1/host1_map_mod.tsv") %>%
+  mutate(target = "host") %>%
+  mutate(seq_type = "shallow sequencing") %>%
+  mutate(status = "swga")
+host2 <- read_tsv("map_stats_parus1_final/01_host_map/run2/host2_map_mod.tsv") %>%
+  mutate(target = "host") %>%
+  mutate(seq_type = "deep sequencing") %>%
+  mutate(status = "swga")
+path1 <- read_tsv("map_stats_parus1_final/02_pathogen_map/run1/path1_map_mod.tsv") %>%
+  mutate(target = "parasite") %>%
+  mutate(seq_type = "shallow sequencing") %>%
+  mutate(status = "swga")
+path2 <- read_tsv("map_stats_parus1_final/02_pathogen_map/run2/path2_map_mod.tsv") %>%
+  mutate(target = "parasite") %>%
+  mutate(seq_type = "deep sequencing") %>%
+  mutate(status = "swga")
+unamp_host <- read_tsv("unamplified_parus1/host_map_mod.tsv") %>%
+  mutate(target = "host") %>%
+  mutate(seq_type = "shallow sequencing") %>%
+  mutate(status = "unamplified")
+unamp_path <- read_tsv("unamplified_parus1/path_map_mod.tsv") %>%
+  mutate(target = "parasite") %>%
+  mutate(seq_type = "shallow sequencing") %>%
+  mutate(status = "unamplified")
+reads1 <- read_tsv("total_mapped_reads_parus1/run1/run1_mapped.tsv") %>%
+  mutate(seq_type = "shallow sequencing") %>%
+  mutate(status = "swga") %>%
+  mutate(SampleID.n = sub("_S.+", "", SampleID))
+reads2 <- read_tsv("total_mapped_reads_parus1/run2/run2_mapped.tsv") %>%
+  mutate(seq_type = "deep sequencing") %>%
+  mutate(status = "swga") %>%
+  mutate(SampleID.n = sub("_S.+", "", SampleID))
+reads_unamp <- read_tsv("total_mapped_reads_parus1/unamp/unamp_mapped.tsv") %>%
+  mutate(seq_type = "shallow sequencing") %>%
+  mutate(status = "unamplified") %>%
+  mutate(SampleID.n = sub("_S.+", "", SampleID)) %>%
+  mutate(SampleID.n = fct_recode(SampleID.n, "96_2_5" = "1EE56066",
+                               "08_2_13" = "1EP50341",
+                               "21_2_18" = "1HA37672",
+                               "21_2_23" = "1EZ96477"))
+
+## join the total reads
+total_reads <- bind_rows(reads1, reads2, reads_unamp) %>%
+  select(-SampleID)
+
+## join and remove extra sample name info and make the unamplified SampleID names match the swga names, also add primer set variable
+dat <- bind_rows(host1, host2, path1, path2, unamp_host, unamp_path) %>%
+  mutate(SampleID.n = sub("_S.+", "", SampleID)) %>%
+  mutate(SampleID.n = fct_recode(SampleID.n, "96_2_5" = "1EE56066",
+                               "08_2_13" = "1EP50341",
+                               "21_2_18" = "1HA37672",
+                               "21_2_23" = "1EZ96477")) %>%
+  mutate(primer_set = str_extract(SampleID.n, "(?<=_)[0-9](?=_?)"))
+
+## pivot_wider to calculate relative proportions of pathogen reads and add in total read counts
+dat.n <- dat %>%
+  select(SampleID.n, MappedReadCount, target, seq_type, status, primer_set) %>%
+  pivot_wider(names_from = target, values_from = MappedReadCount) %>%
+  left_join(total_reads, by = c("SampleID.n", "seq_type", "status")) %>%
+  mutate(prop_path = parasite / Total_Reads) %>%
+  mutate(seq_type = factor(seq_type, levels = c("shallow sequencing",
+                                                "deep sequencing")))
+
+## Supplementary Table
+dat.n_supp <- dat %>%
+  select(SampleID.n, MappedReadCount, Mean_Depth, SD_Depth, Prop, target, seq_type, status, primer_set) %>%  left_join(total_reads, by = c("SampleID.n", "seq_type", "status")) %>%
+  mutate(seq_type = factor(seq_type, levels = c("shallow sequencing",
+                                                "deep sequencing"))) %>%
+  arrange(SampleID.n, status, seq_type, target)
+
+#write_xlsx(dat.n_supp, path = "Supplementary sequence info.xlsx") # save it.
+
+## separate unamplified and primer set 2
+dat.n.unamp <- dat.n %>%
+  filter(!status == "swga")
+
+dat.n.swga <- dat.n %>%
+  filter(status == "swga")
+
+dat.n.swga.ps2 <- dat.n.swga %>%
+  filter(primer_set == 2) %>%
+  filter(!str_detect(SampleID.n, "^Neg_"))
+
+## plot (simple)
+ggplot(dat.n.swga.ps2, aes(x = seq_type, y = prop_path)) +
+  geom_point() +
+  ylab("Proportion of parasite reads") +
+  xlab("SWGA sequencing depth") +
+  geom_line(aes(group = SampleID.n))
+
+## test (overdispersed so adding an individual level factor)
+dat.n.swga.ps2.n <- dat.n.swga.ps2 %>%
+  mutate(ind = 1:n())
+mod <- glmer(cbind(parasite, Total_Reads - parasite) ~ seq_type + (1 | SampleID.n) + (1 | ind), family = "binomial", data = dat.n.swga.ps2.n)
+mod.null <- glmer(cbind(parasite, host) ~ 1 + (1 | SampleID.n) + (1 | ind), family = "binomial", data = dat.n.swga.ps2.n)
+anova(mod, mod.null)
+summary(mod)
+```
+
+Next compare primer set 2 swga (shallow and deep seq) and unamplified samples.
+```{r, message=FALSE, warning=FALSE}
+## primer set 2 and no Negative controls
+dat.nn <- dat.n %>%
+  filter(primer_set == 2) %>%
+  filter(!str_detect(SampleID.n, "^Neg_")) %>%
+  mutate(status.n = if_else(seq_type == "shallow sequencing" & status == "swga",
+                            "SWGA shallow sequencing", status)) %>%
+  mutate(status.n = if_else(seq_type == "deep sequencing" & status == "swga",
+                            "SWGA deep sequencing", status.n)) %>%
+  filter(SampleID.n %in% dat.n.unamp$SampleID.n) %>%
+  mutate(status.n = factor(status.n, levels = c("unamplified",
+                                                "SWGA shallow sequencing",
+                                                "SWGA deep sequencing")))
+
+## plot
+ggplot(dat.nn, aes(x = status.n, y = prop_path)) +
+  geom_point() +
+  geom_line(aes(group = SampleID.n)) +
+  ylab("Proportion of parasite reads") +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Make a more complete plot with all primer set 2 and no negative controls.
+```{r, message=FALSE, warning=FALSE}
+## filter data
+dat.n3 <- dat.n %>%
+  filter(primer_set == 2) %>%
+  filter(!str_detect(SampleID.n, "^Neg_")) %>%
+  mutate(status.n = if_else(seq_type == "shallow sequencing" & status == "swga",
+                            "SWGA shallow\nsequencing", status)) %>%
+  mutate(status.n = if_else(seq_type == "deep sequencing" & status == "swga",
+                            "SWGA deep\nsequencing", status.n)) %>%
+  mutate(status.n = factor(status.n, levels = c("unamplified",
+                                                "SWGA shallow\nsequencing",
+                                                "SWGA deep\nsequencing")))
+
+## plot
+ggplot(dat.n3, aes(x = status.n, y = prop_path)) +
+  geom_point() +
+  geom_line(aes(group = SampleID.n)) +
+  ylab("Proportion of parasite reads") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+## compare shallow and deep seq remove unamplified
+dat.n3.n <- dat.n3 %>%
+  filter(status == "swga")
+mod3 <- lmerTest::lmer(asin(sqrt(prop_path)) ~ seq_type + (1|SampleID.n), data = dat.n3.n)
+anova(mod3, ddf = "Kenward-Roger")
+
+dat.n3.n %>%
+  group_by(seq_type) %>%
+  summarize(mean_prop_path = mean(prop_path),
+            se_prop_path = sd(prop_path)/sqrt(n()))
+```
+
+Compare primer sets in the shallow sequencing.
+```{r, message=FALSE, warning=FALSE}
+## filter data to shallow sequencing run, include Neg Controls, create new sample id without primer set in name, change unamp primer set to "none"
+dat.n4 <- dat.n %>%
+  filter(!seq_type == "deep sequencing") %>%
+  mutate(SampleID.nn = sub("_[0-9]_", "_", SampleID.n)) %>%
+  mutate(primer_set = case_when(status == "unamplified" ~ "none",
+                                TRUE ~ primer_set)) %>%
+  mutate(primer_set = factor(primer_set, levels = c("none", "1", "2", "3"))) %>%
+  mutate(sample_type = if_else(grepl("^Neg_", SampleID.n), "Negative control", "PARUS1 infection"))
+
+## plot to compare primer sets
+ggplot(dat.n4, aes(x = primer_set, y = prop_path)) +
+  geom_point(aes(shape = sample_type)) +
+  geom_line(aes(group = SampleID.nn, linetype = sample_type)) +
+  scale_linetype_manual(values = c(2, 1)) +
+  ylab("Proportion of parasite reads") +
+  xlab("SWGA primer set (shallow sequencing)") +
+  theme_bw() +
+  theme(legend.title = element_blank()) # a hint of contamination or index hopping in the negative control of primer set 2
+```
+
+
+Calculate the mean and se of proportion of parasite reads for primer set 2 for shallow and deep sequencing.
+```{r, warning=FALSE, message=FALSE}
+dat.n3 %>%
+  filter(!status == "unamplified") %>%
+  group_by(seq_type) %>%
+  summarize(mean_prop = mean(prop_path),
+            se_prop = sd(prop_path)/sqrt(n()))
+```
+
+Calculate stats on unamplified samples.
+```{r, warning=FALSE, message=FALSE}
+## mean total reads
+dat.n.unamp %>%
+  summarize(mean_reads = mean(Total_Reads),
+            se_reads = sd(Total_Reads)/sqrt(n()))
+
+## percentage of reads mapped to host
+dat.n.unamp %>%
+  mutate(host_prop = host / Total_Reads) %>%
+  summarize(mean_host_prop = mean(host_prop),
+            se_host_prop = sd(host_prop)/sqrt(n()))
+```
+
+### Sequence depth, breadth, and consistency
+
+Compare mean depth and breadth (i.e., proportion of genome with 1X coverage)
+```{r, message=FALSE, warning=FALSE}
+## subset shallow seq and remove Negative controls
+dat.s <- dat %>%
+  filter(seq_type == "shallow sequencing") %>%
+  filter(!grepl("^Neg", SampleID)) %>%
+  filter(!status == "unamplified") %>%
+  mutate(Year = str_extract(SampleID.n, "[0-9]+(?=_?)")) %>%
+  mutate(Year = factor(Year, levels = c("96", "08", "21"))) %>%
+  mutate(Year = fct_recode(Year, "1996" = "96",
+                           "2008" = "08",
+                           "2021" = "21")) %>%
+  mutate(SampleID.nn = sub("_[0-9]_", "_", SampleID.n))
+
+## plot mean (sd doesn't add much info here so I've left it off)
+ggplot(dat.s, aes(x = primer_set, y = Mean_Depth)) +
+  geom_point(aes(shape = Year)) +
+  geom_line(aes(group = SampleID.nn, linetype = Year)) +
+  xlab("SWGA primer set") +
+  ylab("Mean read depth") +
+  facet_wrap(~target) +
+  theme_bw() +
+  theme(legend.title = element_blank())
+
+## plot breadth
+ggplot(dat.s, aes(x = primer_set, y = Prop)) +
+  geom_point(aes(shape = Year)) +
+  geom_line(aes(group = SampleID.nn, linetype = Year)) +
+  xlab("SWGA primer set (shallow sequencing)") +
+  ylab("Proportion of genome\nwith 1X coverage") +
+  facet_wrap(~target) +
+  theme_bw() +
+  theme(legend.title = element_blank())
+
+## plot correlations
+ggplot(dat.s, aes(x = Mean_Depth, y = Prop)) +
+  geom_point() +
+  facet_wrap(~target)
+
+dat.s %>%
+  group_by(target, primer_set) %>%
+  summarize(cor_stat = cor(Mean_Depth, Prop))
+
+## stats
+dat.s %>%
+  group_by(target, primer_set) %>%
+  summarize(mean_depth = mean(Mean_Depth),
+            se_depth = sd(Mean_Depth)/sqrt(n()),
+            mean_prop = mean(Prop),
+            se_prop = sd(Prop)/sqrt(n()))
+
+## statistical test for comparing primer sets
+dat.s.n <- dat.s %>%
+  filter(target == "parasite")
+mod2 <- lmerTest::lmer(asin(sqrt(Prop)) ~ primer_set + Year + (1|SampleID.nn), data = dat.s.n)
+anova(mod2, ddf = "Kenward-Roger")
+summary(mod2, ddf = "Kenward-Roger")
+```
+
+Subset deep sequencing and compare with shallow sequencing for primer set 2.
+```{r, message=FALSE, warning=FALSE}
+## subset deep seq
+dat.s2 <- dat %>%
+  filter(seq_type == "deep sequencing") %>%
+  filter(!status == "unamplified") %>%
+  mutate(Year = str_extract(SampleID.n, "[0-9]+(?=_?)")) %>%
+  mutate(Year = factor(Year, levels = c("96", "08", "21"))) %>%
+  mutate(Year = fct_recode(Year, "1996" = "96",
+                           "2008" = "08",
+                           "2021" = "21")) %>%
+  mutate(SampleID.nn = sub("_[0-9]_", "_", SampleID.n))
+
+## average and se read count, mean depth, prop
+dat.s2 %>%
+  summarize(mean_reads = mean(MappedReadCount),
+            se_reads = sd(MappedReadCount)/sqrt(n()))
+
+dat.s2 %>%
+  group_by(target) %>%
+  summarize(mean_depth = mean(Mean_Depth),
+            se_depth = sd(Mean_Depth)/sqrt(n()),
+            mean_prop = mean(Prop),
+            se_prop = sd(Prop)/sqrt(n()))
+
+## plot breadth
+ggplot(dat.s2, aes(x = Prop)) +
+  geom_histogram(color = "black", binwidth = 0.1, closed = "left", boundary = 0) +
+  ylab("Number of samples") +
+  xlab("Proportion of genome with 1X coverage (deep sequencing)") +
+  facet_wrap(~target) +
+  theme_bw() +
+  theme(legend.title = element_blank())
+```
+
+Compare the consistency of sequencing across 10kb windows among samples for host and parasite.
+```{r, message=FALSE, warning=FALSE}
+## read count data in 10kb bins for host and pathogen (run2)
+h_counts <- read_tsv("map_stats_parus1_final/01_host_map/host_counts.tsv")
+p_counts <- read_tsv("map_stats_parus1_final/02_pathogen_map/path_counts.tsv")
+
+## host
+h_c <- h_counts %>%
+  unite(id, `#'chr'`:`'end'`) %>%
+  column_to_rownames("id")
+h.n <- cor(h_c, method = "pearson")
+h.n[upper.tri(h.n, diag=TRUE)] <- NA
+h.vec <- as.vector(h.n)
+h.vec <- h.vec[!is.na(h.vec)]
+mean(h.vec) # mean correlations
+sd(h.vec)/sqrt(length(h.vec)) # se correlations
+
+## host
+p_c <- p_counts %>%
+  unite(id, `#'chr'`:`'end'`) %>%
+  column_to_rownames("id")
+p.n <- cor(p_c, method = "pearson")
+p.n[upper.tri(p.n, diag=TRUE)] <- NA
+p.vec <- as.vector(p.n)
+p.vec <- p.vec[!is.na(p.vec)]
+mean(p.vec) # mean correlations
+sd(p.vec)/sqrt(length(p.vec)) # se correlations
+```
+
+### Parasitemia vs. sequencing success
+
+```{r}
+## add in the microscopy data; they come from the file "Firsrun individuals Delawere_MS_ALL.xlsx" sent by email from Olof to Vincenzo on Sept. 30th 2024
+mic.dat <- data.frame(SampleID = c("08_2_11_S4_R1_001_val_1.bam", "08_2_12_S5_R1_001_val_1.bam",
+                                   "21_2_18_S7_R1_001_val_1.bam", "21_2_20_S8_R1_001_val_1.bam",
+                                   "21_2_23_S9_R1_001_val_1.bam"),
+                      Bird_ID = c("1EP51521","1EP51552","1HA37672", "1HA37673", "1EZ96477"),
+                      Parasitemia = c(7, 33, 149, 71, 62))
+
+path2.n <- path2 %>%
+  left_join(mic.dat, by = "SampleID") %>%
+  filter(!is.na(Parasitemia))
+
+ggplot(path2.n, aes(x = Parasitemia, y = Prop)) +
+  geom_point() +
+  ylab("Proportion of reference genome\nwith at least 1X coverage") +
+  theme_bw()
+
+with(path2.n, cor.test(Parasitemia, Prop))
+with(path2.n, cor.test(Parasitemia, Mean_Depth))
+```
+

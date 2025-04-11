@@ -1,0 +1,784 @@
+---
+title: "PARUS1 Methods Paper Analysis"
+author: "Ellis Lab"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Background
+We amplified *Haemoproteus majoris* (lineage PARUS1) DNA using selective whole genome amplification ("swga") in samples taken from the blood of infected blue tits (*Cyanistes caeruleus*). We then prepared Illumina libraries using Nextera kits and sequenced in various ways. All library building and sequencing was performed by Bruce Kingham, Mark Shaw, and other team members of the [UD DNA Sequencing and Genotyping Center](https://dna.dbi.udel.edu/). For our first paper, we will focus on the method and evaluate how the sequencing did. We used a reference genome of a related parasite (lineage WW2) to design the swga primers and we will use that genome for mapping.
+
+
+### Bioinformatics Pipeline
+This document records a bioinformatics pipeline for mapping the paired short reads to the reference and calling variants (SNPs and indels). *Specific goals* include:
+
+* Map and compute statistics (host & parasite) for Run 1 (Miseq Nano, 9 samples over 3 primer sets)
+* Map and compute statistics (host & parasite) for Run 2 (NextSeq 2000, 9 samples with "primer set 2" only)
+* Call SNPs and indels (host & parasite) for the 9 samples of Run 2
+
+The pipeline is written to work on the University of Delaware's [BIOMIX HPC](https://bioit.dbi.udel.edu/BIOMIX/); scripts would need to be adjusted for other systems. The program [`GNU Parallel 20230122 ('Bolsonaristas')`](https://www.gnu.org/software/parallel/) is integrated throughout for speed and [`multiqc` v.1.14](https://multiqc.info/) is used in several steps to summarize results. The pipeline is organized as follows:
+```{r, echo=FALSE, warning=FALSE, message=FALSE, out.width="100%"}
+## packages
+library(DiagrammeR)
+
+## create flowchart pipeline
+grViz("digraph dot {
+      # Node definitions
+      node [fontname = Helvetica, shape = box, fontsize = 24]        
+      a [label = <<b> Illumina Sequence Data </b><br/><i> paired fastq </i>>]
+      b [label = <<b> Remove Adaptors and Quality Trim  </b><br/><i> Trim Galore v.0.6.6 </i>>]
+      e [label = <<b> Map to blue tit reference </b><br/><i> BWA v.0.7.17 </i>>]
+      f [label = <<b> Map unmapped reads to WW2 reference </b><br/><i> BWA v.0.7.17 </i>>]
+      h [label = <<b> Sort mapped Reads </b><br/><i> samtools v.1.19.2 </i>>]
+      i [label = <<b> Mark Duplicate Reads </b><br/><i> picard v.3.1.1 </i>>]
+      j [label = <<b> Index Mapped Reads </b><br/><i> samtools v.1.19.2 </i>>]
+      k [label = <<b> Call SNPs and Indels </b><br/><i> GATK v.4.3.0 </i>>]
+      l [label = <<b> Join Sample Variant Calls </b><br/><i> GATK v.4.3.0 </i>>]
+
+      # Edge definitions
+      a -> b -> e -> f -> h -> i -> j -> k -> l
+      a[style=filled, fillcolor = 'lightblue']
+
+      }")
+```
+
+### How to run the pipeline
+You should set up a directory structure that matches the one here (obviously paths will be slightly different if you're not using Vincenzo's account). Copy the raw sequence read files to the `/00_original_reads` directory. Finally, navigate to the `/scripts` directory and check your read qualities by running `sbatch a-read_quality.slurm`.  If reads are OK, proceed to running the main pipeline with `sbatch run_pipeline.slurm`.
+
+Here's what the directory structure looks like:
+
+```{bash, eval=FALSE}
+[vaellis@biomix parus1_swga_methods_final]$ tree
+.
+├── 00_original_reads
+│   ├── run1
+│   │   ├── 08_1_11_S4_R1_001.fastq.gz
+│   │   ├── 08_1_11_S4_R2_001.fastq.gz
+│   │   ├── 08_1_12_S5_R1_001.fastq.gz
+│   │   ├── 08_1_12_S5_R2_001.fastq.gz
+│   │   ├── 08_1_13_S6_R1_001.fastq.gz
+│   │   ├── 08_1_13_S6_R2_001.fastq.gz
+│   │   ├── 08_2_11_S14_R1_001.fastq.gz
+│   │   ├── 08_2_11_S14_R2_001.fastq.gz
+│   │   ├── 08_2_12_S15_R1_001.fastq.gz
+│   │   ├── 08_2_12_S15_R2_001.fastq.gz
+│   │   ├── 08_2_13_S16_R1_001.fastq.gz
+│   │   ├── 08_2_13_S16_R2_001.fastq.gz
+│   │   ├── 08_3_11_S24_R1_001.fastq.gz
+│   │   ├── 08_3_11_S24_R2_001.fastq.gz
+│   │   ├── 08_3_12_S25_R1_001.fastq.gz
+│   │   ├── 08_3_12_S25_R2_001.fastq.gz
+│   │   ├── 08_3_13_S26_R1_001.fastq.gz
+│   │   ├── 08_3_13_S26_R2_001.fastq.gz
+│   │   ├── 21_1_18_S7_R1_001.fastq.gz
+│   │   ├── 21_1_18_S7_R2_001.fastq.gz
+│   │   ├── 21_1_20_S8_R1_001.fastq.gz
+│   │   ├── 21_1_20_S8_R2_001.fastq.gz
+│   │   ├── 21_1_23_S9_R1_001.fastq.gz
+│   │   ├── 21_1_23_S9_R2_001.fastq.gz
+│   │   ├── 21_2_18_S17_R1_001.fastq.gz
+│   │   ├── 21_2_18_S17_R2_001.fastq.gz
+│   │   ├── 21_2_20_S18_R1_001.fastq.gz
+│   │   ├── 21_2_20_S18_R2_001.fastq.gz
+│   │   ├── 21_2_23_S19_R1_001.fastq.gz
+│   │   ├── 21_2_23_S19_R2_001.fastq.gz
+│   │   ├── 21_3_18_S27_R1_001.fastq.gz
+│   │   ├── 21_3_18_S27_R2_001.fastq.gz
+│   │   ├── 21_3_20_S28_R1_001.fastq.gz
+│   │   ├── 21_3_20_S28_R2_001.fastq.gz
+│   │   ├── 21_3_23_S29_R1_001.fastq.gz
+│   │   ├── 21_3_23_S29_R2_001.fastq.gz
+│   │   ├── 96_1_2_S1_R1_001.fastq.gz
+│   │   ├── 96_1_2_S1_R2_001.fastq.gz
+│   │   ├── 96_1_3_S2_R1_001.fastq.gz
+│   │   ├── 96_1_3_S2_R2_001.fastq.gz
+│   │   ├── 96_1_5_S3_R1_001.fastq.gz
+│   │   ├── 96_1_5_S3_R2_001.fastq.gz
+│   │   ├── 96_2_2_S11_R1_001.fastq.gz
+│   │   ├── 96_2_2_S11_R2_001.fastq.gz
+│   │   ├── 96_2_3_S12_R1_001.fastq.gz
+│   │   ├── 96_2_3_S12_R2_001.fastq.gz
+│   │   ├── 96_2_5_S13_R1_001.fastq.gz
+│   │   ├── 96_2_5_S13_R2_001.fastq.gz
+│   │   ├── 96_3_2_S21_R1_001.fastq.gz
+│   │   ├── 96_3_2_S21_R2_001.fastq.gz
+│   │   ├── 96_3_3_S22_R1_001.fastq.gz
+│   │   ├── 96_3_3_S22_R2_001.fastq.gz
+│   │   ├── 96_3_5_S23_R1_001.fastq.gz
+│   │   ├── 96_3_5_S23_R2_001.fastq.gz
+│   │   ├── Neg_1_31_S10_R1_001.fastq.gz
+│   │   ├── Neg_1_31_S10_R2_001.fastq.gz
+│   │   ├── Neg_2_31_S20_R1_001.fastq.gz
+│   │   ├── Neg_2_31_S20_R2_001.fastq.gz
+│   │   ├── Neg_3_31_S30_R1_001.fastq.gz
+│   │   └── Neg_3_31_S30_R2_001.fastq.gz
+│   └── run2
+│       ├── 08_2_11_S4_R1_001.fastq.gz
+│       ├── 08_2_11_S4_R2_001.fastq.gz
+│       ├── 08_2_12_S5_R1_001.fastq.gz
+│       ├── 08_2_12_S5_R2_001.fastq.gz
+│       ├── 08_2_13_S6_R1_001.fastq.gz
+│       ├── 08_2_13_S6_R2_001.fastq.gz
+│       ├── 21_2_18_S7_R1_001.fastq.gz
+│       ├── 21_2_18_S7_R2_001.fastq.gz
+│       ├── 21_2_20_S8_R1_001.fastq.gz
+│       ├── 21_2_20_S8_R2_001.fastq.gz
+│       ├── 21_2_23_S9_R1_001.fastq.gz
+│       ├── 21_2_23_S9_R2_001.fastq.gz
+│       ├── 96_2_2_S1_R1_001.fastq.gz
+│       ├── 96_2_2_S1_R2_001.fastq.gz
+│       ├── 96_2_3_S2_R1_001.fastq.gz
+│       ├── 96_2_3_S2_R2_001.fastq.gz
+│       ├── 96_2_5_S3_R1_001.fastq.gz
+│       └── 96_2_5_S3_R2_001.fastq.gz
+├── reference_genomes
+│   ├── GCA_030015615.1_cyaCae_Pacbio_Achrs_GRC_genomic.fna
+│   └── WW2_genome_against_SISKIN1.fasta
+└── scripts
+    ├── a-read_quality.slurm
+    ├── b-remove_adaptors_quality_trim.sh
+    ├── c-mapping.sh
+    ├── d-mark_duplicates_sort_index.sh
+    ├── e-call_variants_join.sh
+    ├── helpers.sh
+    └── run_pipeline.slurm
+
+5 directories, 87 files
+```
+
+Note that the files in subdirectories `run1` and `run2` were extracted from the files `231101_L6D3L_ellis.tar` and `231115_AACVWHYM5_Ellis.tar`. These are the files that the UD Sequencing Center sent. You can extract the files with `tar -xvf` then navigate to the sequence files in the embedded subdirectory of the tar file.
+
+### Scripts
+The `helpers.sh` script. The other scripts will source environmental variables from this script.
+```{bash, eval=FALSE}
+## parallel tasks
+NUM_TASKS=8
+
+## software
+FASTQC="/usr/local/FastQC/fastqc"
+TRIM_GALORE="/usr/local/bin/trim_galore"
+PICARD="java -jar /home/vaellis/packages/picard.jar"
+GATK="/usr/local/gatk/gatk"
+
+## directories
+START_DIR=/work/vaellis/parus1_swga_methods_final
+
+SCRIPT_DIR=${START_DIR}/scripts
+
+REF_DIR=${START_DIR}/reference_genomes
+
+# directories with separated runs
+READ_DIR=${START_DIR}/00_original_reads
+RUN1_DIR=${READ_DIR}/run1
+RUN2_DIR=${READ_DIR}/run2
+
+READ_QUAL_DIR=${START_DIR}/01_read_qual_reports
+RUN1_READ_QUAL_DIR=${READ_QUAL_DIR}/run1
+RUN2_READ_QUAL_DIR=${READ_QUAL_DIR}/run2
+
+TRIMMEDQC_READ_DIR=${START_DIR}/02_trimmedQC_reads
+RUN1_TRIMMEDQC_READ_DIR=${TRIMMEDQC_READ_DIR}/run1
+RUN2_TRIMMEDQC_READ_DIR=${TRIMMEDQC_READ_DIR}/run2
+
+TRIMMEDQC_READ_QUAL_DIR=${START_DIR}/03_trimmedQC_read_qual_reports
+RUN1_TRIMMEDQC_READ_QUAL_DIR=${TRIMMEDQC_READ_QUAL_DIR}/run1
+RUN2_TRIMMEDQC_READ_QUAL_DIR=${TRIMMEDQC_READ_QUAL_DIR}/run2
+
+HOST_MAP_BAM_DIR=${START_DIR}/04a_mapped_to_host_bam
+RUN1_HOST_MAP_BAM_DIR=${HOST_MAP_BAM_DIR}/run1
+RUN2_HOST_MAP_BAM_DIR=${HOST_MAP_BAM_DIR}/run2
+
+HOST_UNMAPPED_DIR=${START_DIR}/04b_unmapped_to_host_bam
+RUN1_UNMAPPED_HOST_BAM_DIR=${HOST_UNMAPPED_DIR}/run1_unmapped_host_bam
+RUN2_UNMAPPED_HOST_BAM_DIR=${HOST_UNMAPPED_DIR}/run2_unmapped_host_bam
+
+RUN1_UNMAPPED_HOST_FQ_DIR=${HOST_UNMAPPED_DIR}/run1_unmapped_host_fq
+RUN2_UNMAPPED_HOST_FQ_DIR=${HOST_UNMAPPED_DIR}/run2_unmapped_host_fq
+
+HOST_MAP_STATS_DIR=${START_DIR}/05_mapped_to_host_stats
+RUN1_HOST_MAP_STATS_DIR=${HOST_MAP_STATS_DIR}/run1
+RUN2_HOST_MAP_STATS_DIR=${HOST_MAP_STATS_DIR}/run2
+
+PATHOGEN_MAP_BAM_DIR=${START_DIR}/06_mapped_to_pathogen_bam
+RUN1_PATHOGEN_MAP_BAM_DIR=${PATHOGEN_MAP_BAM_DIR}/run1
+RUN2_PATHOGEN_MAP_BAM_DIR=${PATHOGEN_MAP_BAM_DIR}/run2
+
+PATHOGEN_MAP_STATS_DIR=${START_DIR}/07_mapped_to_pathogen_stats
+RUN1_PATHOGEN_MAP_STATS_DIR=${PATHOGEN_MAP_STATS_DIR}/run1
+RUN2_PATHOGEN_MAP_STATS_DIR=${PATHOGEN_MAP_STATS_DIR}/run2
+
+# only run 2 reads are used for mapping and variant calling
+HOST_BAM_MRKDUP_DIR=${START_DIR}/08_host_bam_mrkdup
+
+PATHOGEN_BAM_MRKDUP_DIR=${START_DIR}/09_pathogen_bam_mrkdup
+
+HOST_INDIVIDUAL_VCF_DIR=${START_DIR}/10_host_individual_vcf
+
+PATHOGEN_INDIVIDUAL_VCF_DIR=${START_DIR}/11_pathogen_individual_vcf
+
+HOST_JOINT_VCF_DIR=${START_DIR}/12_host_joint_vcf
+
+PATHOGEN_JOINT_VCF_DIR=${START_DIR}/13_pathogen_joint_vcf
+
+## files (reference fasta files)
+HOST_REF=${REF_DIR}/GCA_030015615.1_cyaCae_Pacbio_Achrs_GRC_genomic.fna
+PATHOGEN_REF=${REF_DIR}/WW2_genome_against_SISKIN1.fasta
+```
+
+Script: `a-read_quality.slurm`. Run this first before running the main pipeline (`run_pipeline.slurm`) to check that the reads are OK.
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=fastqc
+#SBATCH --ntasks=8
+#SBATCH --mem=128GB
+#SBATCH --mail-type=END,FAIL,TIME_LIMIT_80,TIME_LIMIT_90
+#SBATCH --mail-user=vaellis@udel.edu
+
+# Source helpers.sh script to load variables
+source /work/vaellis/parus1_swga_methods_final/scripts/helpers.sh
+
+# make directories
+mkdir -p ${READ_QUAL_DIR}
+mkdir -p ${RUN1_READ_QUAL_DIR}
+mkdir -p ${RUN2_READ_QUAL_DIR}
+
+##########
+## run1 ##
+##########
+
+# run fastqc
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${FASTQC} \
+{} \
+-o ${RUN1_READ_QUAL_DIR}" ::: \
+${RUN1_DIR}/*.fastq.gz
+
+# run multiqc
+cd ${RUN1_READ_QUAL_DIR}
+multiqc .
+mv multiqc_report.html run1_original_read_multiqc_report.html
+
+###########
+## run2  ##
+###########
+
+# run fastqc
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${FASTQC} \
+{} \
+-o ${RUN2_READ_QUAL_DIR}" ::: \
+${RUN2_DIR}/*.fastq.gz
+
+# run multiqc
+cd ${RUN2_READ_QUAL_DIR}
+multiqc .
+mv multiqc_report.html run2_original_read_multiqc_report.html
+```
+
+Script: `b-remove_adaptors_quality_trim.sh`
+```{bash, eval=FALSE}
+#!/bin/bash
+source /work/vaellis/parus1_swga_methods_final/scripts/helpers.sh
+
+mkdir -p ${TRIMMEDQC_READ_DIR}
+mkdir -p ${RUN1_TRIMMEDQC_READ_DIR}
+mkdir -p ${RUN2_TRIMMEDQC_READ_DIR}
+
+mkdir -p ${TRIMMEDQC_READ_QUAL_DIR}
+mkdir -p ${RUN1_TRIMMEDQC_READ_QUAL_DIR}
+mkdir -p ${RUN2_TRIMMEDQC_READ_QUAL_DIR}
+
+# remove adaptors, --link stops parallel from making multiple combinations of input sources;
+# relies on forward read files containing _R1_ and reverse read files containing _R2_ in the names;
+# note that trim_galore will output *_val_1.fq.gz and *_val_2.fq.gz files
+
+##########
+## run1 ##
+##########
+
+parallel --link --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${TRIM_GALORE} \
+--length 50 \
+--quality 20 \
+--output_dir ${RUN1_TRIMMEDQC_READ_DIR} \
+--paired {1} {2}" ::: \
+${RUN1_DIR}/*_R1_* ::: \
+${RUN1_DIR}/*_R2_*
+
+# move read reports to separate directory
+cd ${RUN1_TRIMMEDQC_READ_DIR}
+mv *_trimming_report.txt ${RUN1_TRIMMEDQC_READ_QUAL_DIR}
+
+# run fastqc on trimmed reads
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${FASTQC} \
+{} \
+-o ${RUN1_TRIMMEDQC_READ_QUAL_DIR}" ::: \
+${RUN1_TRIMMEDQC_READ_DIR}/*.fq.gz
+
+# run multiqc to summarize
+cd ${RUN1_TRIMMEDQC_READ_QUAL_DIR}
+multiqc .
+mv multiqc_report.html run1_trimmedqc_read_multiqc_report.html
+
+##########
+## run2 ##
+##########
+
+parallel --link --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${TRIM_GALORE} \
+--length 50 \
+--quality 20 \
+--output_dir ${RUN2_TRIMMEDQC_READ_DIR} \
+--paired {1} {2}" ::: \
+${RUN2_DIR}/*_R1_* ::: \
+${RUN2_DIR}/*_R2_*
+
+# move read reports to separate directory
+cd ${RUN2_TRIMMEDQC_READ_DIR}
+mv *_trimming_report.txt ${RUN2_TRIMMEDQC_READ_QUAL_DIR}
+
+# run fastqc on trimmed reads
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${FASTQC} \
+{} \
+-o ${RUN2_TRIMMEDQC_READ_QUAL_DIR}" ::: \
+${RUN2_TRIMMEDQC_READ_DIR}/*.fq.gz
+
+# run multiqc to summarize
+cd ${RUN2_TRIMMEDQC_READ_QUAL_DIR}
+multiqc .
+mv multiqc_report.html run2_trimmedqc_read_multiqc_report.html
+```
+
+Script: `c-mapping.sh`
+```{bash,eval=FALSE}
+#!/bin/bash
+source /work/vaellis/parus1_swga_methods_final/scripts/helpers.sh
+
+mkdir -p ${HOST_MAP_BAM_DIR}
+mkdir -p ${RUN1_HOST_MAP_BAM_DIR}
+mkdir -p ${RUN2_HOST_MAP_BAM_DIR}
+
+mkdir -p ${HOST_UNMAPPED_DIR}
+mkdir -p ${RUN1_UNMAPPED_HOST_BAM_DIR}
+mkdir -p ${RUN2_UNMAPPED_HOST_BAM_DIR}
+
+mkdir -p ${RUN1_UNMAPPED_HOST_FQ_DIR}
+mkdir -p ${RUN2_UNMAPPED_HOST_FQ_DIR}
+
+mkdir -p ${HOST_MAP_STATS_DIR}
+mkdir -p ${RUN1_HOST_MAP_STATS_DIR}
+mkdir -p ${RUN2_HOST_MAP_STATS_DIR}
+
+mkdir -p ${PATHOGEN_MAP_BAM_DIR}
+mkdir -p ${RUN1_PATHOGEN_MAP_BAM_DIR}
+mkdir -p ${RUN2_PATHOGEN_MAP_BAM_DIR}
+
+mkdir -p ${PATHOGEN_MAP_STATS_DIR}
+mkdir -p ${RUN1_PATHOGEN_MAP_STATS_DIR}
+mkdir -p ${RUN2_PATHOGEN_MAP_STATS_DIR}
+
+
+# index reference genome fastas with bwa
+cd ${REF_DIR}
+bwa index ${HOST_REF}
+bwa index ${PATHOGEN_REF}
+
+##########
+## run1 ##
+##########
+
+## map to host ##
+
+parallel --link --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"bwa mem \
+${HOST_REF} \
+{1} {2} \
+> ${RUN1_HOST_MAP_BAM_DIR}/{1/.}.sam" ::: \
+${RUN1_TRIMMEDQC_READ_DIR}/*_R1_* ::: \
+${RUN1_TRIMMEDQC_READ_DIR}/*_R2_*
+
+# remove .fq from file ending
+cd ${RUN1_HOST_MAP_BAM_DIR}
+for f in *.fq.sam; do
+mv -- "$f" "${f%%.*}.sam";
+done
+
+# convert sam to bam
+for f in *.sam; do
+  samtools view -b "$f" > "${f%%.*}.bam";
+done
+
+# delete sam
+rm *.sam
+
+# collect mapping stats
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools stats {} \
+> ${RUN1_HOST_MAP_STATS_DIR}/{/.}.stats.txt" ::: \
+$(find -name '*.bam')
+
+cd ${RUN1_HOST_MAP_STATS_DIR}
+multiqc .
+mv multiqc_report.html run1_mapped_host_multiqc_report.html
+
+# save unmapped reads as bam
+cd ${RUN1_HOST_MAP_BAM_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools view -f 4 -b {} \
+> ${RUN1_UNMAPPED_HOST_BAM_DIR}/{/.}.unmapped.bam" ::: \
+$(find -name '*.bam')
+
+# convert to fastq; note this will produce a single file: The output file is suitable for use with bwa mem -p which understands interleaved files containing a mixture of paired and singleton reads.
+cd ${RUN1_UNMAPPED_HOST_BAM_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools fastq -0 /dev/null {} \
+> ${RUN1_UNMAPPED_HOST_FQ_DIR}/{/.}.fq" ::: \
+$(find -name '*.unmapped.bam')
+
+# remove the unmapped. from the end of the file name
+cd ${RUN1_UNMAPPED_HOST_FQ_DIR}
+for f in *.unmapped.fq; do
+mv -- "$f" "${f%%.*}.fq";
+done
+
+## map unmapped reads to pathogen ##
+
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"bwa mem \
+-p \
+${PATHOGEN_REF} \
+{} \
+> ${RUN1_PATHOGEN_MAP_BAM_DIR}/{/.}.sam" ::: \
+$(find -name '*.fq')
+
+# convert sam to bam
+cd ${RUN1_PATHOGEN_MAP_BAM_DIR}
+for f in *.sam; do
+  samtools view -b "$f" > "${f%%.*}.bam";
+done
+
+# delete sam
+rm *.sam
+
+# collect mapping stats
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools stats {} \
+> ${RUN1_PATHOGEN_MAP_STATS_DIR}/{/.}.stats.txt" ::: \
+$(find -name '*.bam')
+
+cd ${RUN1_PATHOGEN_MAP_STATS_DIR}
+multiqc .
+mv multiqc_report.html run1_mapped_pathogen_multiqc_report.html
+
+##########
+## run2 ##
+##########
+
+## map to host ##
+
+parallel --link --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"bwa mem \
+${HOST_REF} \
+{1} {2} \
+> ${RUN2_HOST_MAP_BAM_DIR}/{1/.}.sam" ::: \
+${RUN2_TRIMMEDQC_READ_DIR}/*_R1_* ::: \
+${RUN2_TRIMMEDQC_READ_DIR}/*_R2_*
+
+# remove .fq from file ending
+cd ${RUN2_HOST_MAP_BAM_DIR}
+for f in *.fq.sam; do
+mv -- "$f" "${f%%.*}.sam";
+done
+
+# convert sam to bam
+for f in *.sam; do
+  samtools view -b "$f" > "${f%%.*}.bam";
+done
+
+# delete sam
+rm *.sam
+
+# collect mapping stats
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools stats {} \
+> ${RUN2_HOST_MAP_STATS_DIR}/{/.}.stats.txt" ::: \
+$(find -name '*.bam')
+
+cd ${RUN2_HOST_MAP_STATS_DIR}
+multiqc .
+mv multiqc_report.html run2_mapped_host_multiqc_report.html
+
+# save unmapped reads as bam
+cd ${RUN2_HOST_MAP_BAM_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools view -f 4 -b {} \
+> ${RUN2_UNMAPPED_HOST_BAM_DIR}/{/.}.unmapped.bam" ::: \
+$(find -name '*.bam')
+
+# convert to fastq; note this will produce a single file.
+cd ${RUN2_UNMAPPED_HOST_BAM_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools fastq -0 /dev/null {} \
+> ${RUN2_UNMAPPED_HOST_FQ_DIR}/{/.}.fq" ::: \
+$(find -name '*.unmapped.bam')
+
+# remove the unmapped. from the end of the file name
+cd ${RUN2_UNMAPPED_HOST_FQ_DIR}
+for f in *.unmapped.fq; do
+mv -- "$f" "${f%%.*}.fq";
+done
+
+## map unmapped reads to pathogen ##
+
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"bwa mem \
+-p \
+${PATHOGEN_REF} \
+{} \
+> ${RUN2_PATHOGEN_MAP_BAM_DIR}/{/.}.sam" ::: \
+$(find -name '*.fq')
+
+# convert sam to bam
+cd ${RUN2_PATHOGEN_MAP_BAM_DIR}
+for f in *.sam; do
+  samtools view -b "$f" > "${f%%.*}.bam";
+done
+
+# delete sam
+rm *.sam
+
+# collect mapping stats
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools stats {} \
+> ${RUN2_PATHOGEN_MAP_STATS_DIR}/{/.}.stats.txt" ::: \
+$(find -name '*.bam')
+
+cd ${RUN2_PATHOGEN_MAP_STATS_DIR}
+multiqc .
+mv multiqc_report.html run2_mapped_pathogen_multiqc_report.html
+```
+
+Script: `d-mark_duplicates_sort_index.sh`
+```{bash, eval=FALSE}
+#!/bin/bash
+source /work/vaellis/parus1_swga_methods_final/scripts/helpers.sh
+
+mkdir -p ${HOST_BAM_MRKDUP_DIR}
+mkdir -p ${PATHOGEN_BAM_MRKDUP_DIR}
+
+## only run 2 reads are processed at this point in the scripts ##
+
+
+##########
+## Host ##
+##########
+
+# sort bams in preparation for mark duplicates
+cd ${RUN2_HOST_MAP_BAM_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools sort {} \
+-O bam \
+> ${HOST_BAM_MRKDUP_DIR}/{/.}.sort.bam" ::: \
+$(find -name '*.bam')
+
+# mark duplicates
+cd ${HOST_BAM_MRKDUP_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${PICARD} MarkDuplicates \
+I={} \
+O={/.}.marked_duplicates.bam \
+M={/.}.marked_dup_metrics.txt" ::: \
+$(find -name '*.sort.bam')
+
+# remove the sorted bams that did not have duplicates marked
+rm *.sort.bam
+
+# add read groups to the sorted, marked duplicate bam files
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${PICARD} AddOrReplaceReadGroups \
+I={} \
+O={/.}.rg.bam \
+RGLB=lib1 \
+RGPL=ILLUMINA \
+RGPU=unit1 \
+RGSM={/.}" ::: \
+$(find -name '*.marked_duplicates.bam')
+
+# remove the bams without read groups
+rm *.marked_duplicates.bam
+
+# index bams. These bams now are sorted, with duplicates marked, read groups added, and indexed.
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools index {}" ::: \
+$(find -name '*.rg.bam')
+
+# multiqc
+multiqc .
+mv multiqc_report.html host_markdup_read_multiqc_report.html
+
+
+##############
+## Pathogen ##
+##############
+
+# sort bams in preparation for mark duplicates
+cd ${RUN2_PATHOGEN_MAP_BAM_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools sort {} \
+-O bam \
+> ${PATHOGEN_BAM_MRKDUP_DIR}/{/.}.sort.bam" ::: \
+$(find -name '*.bam')
+
+# mark duplicates
+cd ${PATHOGEN_BAM_MRKDUP_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${PICARD} MarkDuplicates \
+I={} \
+O={/.}.marked_duplicates.bam \
+M={/.}.marked_dup_metrics.txt" ::: \
+$(find -name '*.sort.bam')
+
+# remove the sorted bams that did not have duplicates marked
+rm *.sort.bam
+
+# add read groups to the sorted, marked duplicate bam files
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${PICARD} AddOrReplaceReadGroups \
+I={} \
+O={/.}.rg.bam \
+RGLB=lib1 \
+RGPL=ILLUMINA \
+RGPU=unit1 \
+RGSM={/.}" ::: \
+$(find -name '*.marked_duplicates.bam')
+
+# remove the bams without read groups
+rm *.marked_duplicates.bam
+
+# index bams. These bams now are sorted, with duplicates marked, read groups added, and indexed.
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools index {}" ::: \
+$(find -name '*.rg.bam')
+
+# multiqc
+multiqc .
+mv multiqc_report.html pathogen_markdup_read_multiqc_report.html
+```
+
+Script: `e-call_variants_join.sh`
+```{bash, eval=FALSE}
+#!/bin/bash
+source /work/vaellis/parus1_swga_methods_final/scripts/helpers.sh
+
+mkdir -p ${HOST_INDIVIDUAL_VCF_DIR}
+mkdir -p ${PATHOGEN_INDIVIDUAL_VCF_DIR}
+mkdir -p ${HOST_JOINT_VCF_DIR}
+mkdir -p ${PATHOGEN_JOINT_VCF_DIR}
+
+##########
+## Host ##
+##########
+
+# first index the reference genome
+cd ${REF_DIR}
+samtools faidx ${HOST_REF}
+
+# next create a "dictionary"
+${PICARD} CreateSequenceDictionary \
+R=${HOST_REF}
+
+# call SNPs and Indels with HaplotypeCaller
+cd ${HOST_BAM_MRKDUP_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${GATK} --java-options "-Xmx32g" HaplotypeCaller \
+-R ${HOST_REF} \
+-I {} \
+-ploidy 2 \
+-O ${HOST_INDIVIDUAL_VCF_DIR}/{/.}.g.vcf.gz \
+-ERC GVCF" ::: \
+$(find -name '*.rg.bam')
+
+# combine the vcfs
+cd ${HOST_INDIVIDUAL_VCF_DIR}
+ls *.vcf.gz > gvcfs.list
+${GATK} --java-options "-Xmx200g" CombineGVCFs \
+-R ${HOST_REF} \
+--variant gvcfs.list \
+-O ${HOST_JOINT_VCF_DIR}/joint.g.vcf.gz
+
+# joint genotyping (needed to get the vcf into standard format)
+cd ${HOST_JOINT_VCF_DIR}
+${GATK} --java-options "-Xmx200g" GenotypeGVCFs \
+   -R ${HOST_REF} \
+   -V joint.g.vcf.gz \
+   -O host_joint_final.vcf.gz
+
+##############
+## PATHOGEN ##
+##############
+
+# first index the reference genome
+cd ${REF_DIR}
+samtools faidx ${PATHOGEN_REF}
+
+# next create a "dictionary"
+${PICARD} CreateSequenceDictionary \
+R=${PATHOGEN_REF}
+
+# call SNPs and Indels with HaplotypeCaller
+cd ${PATHOGEN_BAM_MRKDUP_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${GATK} --java-options "-Xmx32g" HaplotypeCaller \
+-R ${PATHOGEN_REF} \
+-I {} \
+-ploidy 1 \
+-O ${PATHOGEN_INDIVIDUAL_VCF_DIR}/{/.}.g.vcf.gz \
+-ERC GVCF" ::: \
+$(find -name '*.rg.bam')
+
+# combine the vcfs
+cd ${PATHOGEN_INDIVIDUAL_VCF_DIR}
+ls *.vcf.gz > gvcfs.list
+${GATK} --java-options "-Xmx200g" CombineGVCFs \
+-R ${PATHOGEN_REF} \
+--variant gvcfs.list \
+-O ${PATHOGEN_JOINT_VCF_DIR}/joint.g.vcf.gz
+
+# joint genotyping (needed to get the vcf into standard format)
+cd ${PATHOGEN_JOINT_VCF_DIR}
+${GATK} --java-options "-Xmx200g" GenotypeGVCFs \
+   -R ${PATHOGEN_REF} \
+   -V joint.g.vcf.gz \
+   -O pathogen_joint_final.vcf.gz
+```
+
+Script: `run_pipeline.slurm`
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=var_call
+#SBATCH --ntasks=8
+#SBATCH --mem=256GB
+#SBATCH --time=10-12
+#SBATCH --mail-type=END,FAIL,TIME_LIMIT_80,TIME_LIMIT_90
+#SBATCH --mail-user=vaellis@udel.edu
+
+# source helpers.sh
+source /work/vaellis/parus1_swga_methods_final/scripts/helpers.sh
+
+# Define a function to execute each step
+run_step() {
+    local step_script="$1"
+    local step_name="$2"
+    echo "Starting $step_name at $(date)"
+    bash "$step_script"
+    echo "Finished $step_name at $(date)"
+}
+
+# Execute each step in sequence
+run_step b-remove_adaptors_quality_trim.sh "Remove Adaptors and Quality Trim Reads"
+run_step c-mapping.sh "Map Reads to Host and Pathogen"
+run_step d-mark_duplicates_sort_index.sh "Sort Mark Duplicates and Index"
+run_step e-call_variants_join.sh "Call Variants"
+```

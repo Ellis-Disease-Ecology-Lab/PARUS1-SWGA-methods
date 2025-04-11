@@ -1,0 +1,251 @@
+---
+title: "PARUS1 read GC content and vcf filtering"
+author: "Ellis Lab"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Background
+Responding to a few final analysis ideas from Olof:
+
+* Show histograms of GC distributions of 1) reads mapped to host, 2) reads mapped to parasite, 3) unmapped reads  [the idea is that if the unmapped reads are too diverged from the WW2 reference, a low GC will reveal them as parasite reads]
+* The final variant count for parasites (307) is very conservative because it uses min of 6 infections at a site, and 5x depth. To visualize a "best case scenario", filter the VCF to the top 4 parasitemia samples, then count number of variants with different filters (all 4 infections present at a site, min depth of 1x, 2x, 3x, 4x, 5x, keep quality of 30 constant) - put this in a table.
+* In the final conservative variant file determine how many sites are being compared to identify those variants (i.e., how many sites with the min infections, mapping quality scores, and depth)
+
+### Code
+GC code, `gc.slurm`.
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=GC
+#SBATCH --ntasks=10
+#SBATCH --mem=160GB
+#SBATCH --time=10-12
+#SBATCH --mail-type=END,FAIL,TIME_LIMIT_80,TIME_LIMIT_90
+#SBATCH --mail-user=vaellis@udel.edu
+
+####################################
+## define environmental variables ##
+####################################
+
+## existing directories and files
+START_DIR=/work/vaellis/parus1_swga_methods_final
+HOST_VCF_DIR=${START_DIR}/12_host_joint_vcf
+PATH_VCF_DIR=${START_DIR}/13_pathogen_joint_vcf
+VCF_H=${HOST_VCF_DIR}/host_joint_final.vcf.gz
+VCF_P=${PATH_VCF_DIR}/pathogen_joint_final.vcf.gz
+
+POPGEN_DIR=/work/vaellis/parus1_swga_popgen
+POP_HOST_DIR=${POPGEN_DIR}/host
+POP_PATH_DIR=${POPGEN_DIR}/pathogen
+VCF_H_F=${POP_HOST_DIR}/host_filt_joint_final.vcf.gz
+VCF_P_F=${POP_PATH_DIR}/path_filt_joint_final.vcf.gz
+
+HOST_MAP_BAM_DIR=${START_DIR}/04a_mapped_to_host_bam
+RUN2_HOST_MAP_BAM_DIR=${HOST_MAP_BAM_DIR}/run2
+
+PATHOGEN_MAP_BAM_DIR=${START_DIR}/06_mapped_to_pathogen_bam
+RUN2_PATHOGEN_MAP_BAM_DIR=${PATHOGEN_MAP_BAM_DIR}/run2
+
+
+########
+## GC ##
+########
+
+## host reads excluding unmapped (remove unmapped from bam, convert to fastq, use seqkit to calculate GC of all reads, then awk to calculate the mean)
+host_map=${RUN2_HOST_MAP_BAM_DIR}/host_gc.tsv
+echo -e "SampleID\tMeanGC" > ${host_map}
+
+for f in ${RUN2_HOST_MAP_BAM_DIR}/*.bam; do
+  SAMPLE_ID=$(basename "$f")
+  MEAN_GC=$(samtools view -b -F 0x4 -@ 8 "$f" | samtools fastq -0 /dev/null -@ 8 | seqkit fx2tab --gc | awk '{sum+=$4} END {print sum/NR}')
+  echo -e "${SAMPLE_ID}\t${MEAN_GC}" >> "${host_map}"
+done
+
+## parasite reads excluding unmapped
+path_map=${RUN2_PATHOGEN_MAP_BAM_DIR}/path_gc.tsv
+echo -e "SampleID\tMeanGC" > ${path_map}
+
+for f in ${RUN2_PATHOGEN_MAP_BAM_DIR}/*.bam; do
+  SAMPLE_ID=$(basename "$f")
+  MEAN_GC=$(samtools view -b -F 0x4 -@ 8 "$f" | samtools fastq -0 /dev/null -@ 8 | seqkit fx2tab --gc | awk '{sum+=$4} END {print sum/NR}')
+  echo -e "${SAMPLE_ID}\t${MEAN_GC}" >> "${path_map}"
+done
+
+## remaining unmapped (notice the samtools view flag -f means keep not exclude)
+na_map=${RUN2_PATHOGEN_MAP_BAM_DIR}/unmapped_gc.tsv
+echo -e "SampleID\tMeanGC" > ${na_map}
+
+for f in ${RUN2_PATHOGEN_MAP_BAM_DIR}/*.bam; do
+  SAMPLE_ID=$(basename "$f")
+  MEAN_GC=$(samtools view -b -f 0x4 -@ 8 "$f" | samtools fastq -0 /dev/null -@ 8 | seqkit fx2tab --gc | awk '{sum+=$4} END {print sum/NR}')
+  echo -e "${SAMPLE_ID}\t${MEAN_GC}" >> "${na_map}"
+done
+```
+
+Plot GC. I downloaded the files to my computer.
+```{r, warning=FALSE, message=FALSE}
+## set wd
+setwd("C:/Users/vaellis/OneDrive - University of Delaware - o365/Documents/Ellis_Lab/Research/Malaria/SWGA/PARUS1 Methods Paper")
+
+## packages
+library(tidyverse)
+
+## read data
+host <- read_tsv("host_gc.tsv") %>%
+  rename("host" = "MeanGC")
+path <- read_tsv("path_gc.tsv") %>%
+  rename("parasite" = "MeanGC")
+unmap <- read_tsv("unmapped_gc.tsv") %>%
+  rename("unmapped" = "MeanGC")
+
+## combine
+dat <- host %>%
+  left_join(path, by = "SampleID") %>%
+  left_join(unmap, by = "SampleID") %>%
+  pivot_longer(!SampleID, names_to = "type", values_to = "GC")
+
+## plot
+ggplot(dat, aes(x = GC)) +
+  geom_histogram(binwidth = 0.5, closed = "left", boundary = 0, color = "black") +
+  ylab("Number of samples") +
+  xlab("Mean percent GC content per sample") +
+  theme_bw() +
+  facet_grid(rows = vars(type))
+```
+
+Change depth and count number of variants on top 4 best sequenced individuals.
+```{bash, eval=FALSE}
+####################################
+## define environmental variables ##
+####################################
+
+## existing directories and files
+START_DIR=/work/vaellis/parus1_swga_methods_final
+HOST_VCF_DIR=${START_DIR}/12_host_joint_vcf
+PATH_VCF_DIR=${START_DIR}/13_pathogen_joint_vcf
+VCF_H=${HOST_VCF_DIR}/host_joint_final.vcf.gz
+VCF_P=${PATH_VCF_DIR}/pathogen_joint_final.vcf.gz
+
+## new files
+VCF_P_4=/work/vaellis/path_sub4.vcf.gz
+VCF_1X=/work/vaellis/path_sub4_1x.vcf.gz
+VCF_2X=/work/vaellis/path_sub4_2x.vcf.gz
+VCF_3X=/work/vaellis/path_sub4_3x.vcf.gz
+VCF_4X=/work/vaellis/path_sub4_4x.vcf.gz
+VCF_5X=/work/vaellis/path_sub4_5x.vcf.gz
+
+## subset to best sequenced parasites
+## 21_2_18_S7_R1_001_val_1.sort.marked_duplicates
+## 08_2_13_S6_R1_001_val_1.sort.marked_duplicates
+## 96_2_5_S3_R1_001_val_1.sort.marked_duplicates
+## 21_2_20_S8_R1_001_val_1.sort.marked_duplicates
+bcftools view -s 21_2_18_S7_R1_001_val_1.sort.marked_duplicates,08_2_13_S6_R1_001_val_1.sort.marked_duplicates,96_2_5_S3_R1_001_val_1.sort.marked_duplicates,21_2_20_S8_R1_001_val_1.sort.marked_duplicates ${VCF_P} -Oz -o ${VCF_P_4}
+
+# restrict to sites with 0 missing genotypes, minimum depth of 1,
+# minimum quality of 30
+bcftools +fill-tags ${VCF_P_4}  -- -t 'NMISS=N_MISSING' | \
+bcftools filter -i 'NMISS=0 && FORMAT/DP>=1 && QUAL>=30' -O z -o ${VCF_1X}
+# number of multiallelic variants (1109, 202 SNPs)
+bcftools stats ${VCF_1X} | less
+bcftools query -f '[%GT]\n' ${VCF_1X} | awk '{ gsub(/\./, ""); print }' | grep -Ev '^(.)\1+$' | wc -l # 13358
+
+# restrict to sites with 0 missing genotypes, minimum depth of 2,
+# minimum quality of 30
+bcftools +fill-tags ${VCF_P_4}  -- -t 'NMISS=N_MISSING' | \
+bcftools filter -i 'NMISS=0 && FORMAT/DP>=2 && QUAL>=30' -O z -o ${VCF_2X}
+# number of multiallelic variants (1108, 201 SNPs)
+bcftools stats ${VCF_2X} | less
+bcftools query -f '[%GT]\n' ${VCF_2X} | awk '{ gsub(/\./, ""); print }' | grep -Ev '^(.)\1+$' | wc -l # 13276
+
+# restrict to sites with 0 missing genotypes, minimum depth of 3,
+# minimum quality of 30
+bcftools +fill-tags ${VCF_P_4}  -- -t 'NMISS=N_MISSING' | \
+bcftools filter -i 'NMISS=0 && FORMAT/DP>=3 && QUAL>=30' -O z -o ${VCF_3X}
+# number of multiallelic variants (1096, 201 SNPs)
+bcftools stats ${VCF_3X} | less
+bcftools query -f '[%GT]\n' ${VCF_3X} | awk '{ gsub(/\./, ""); print }' | grep -Ev '^(.)\1+$' | wc -l # 12639
+
+# restrict to sites with 0 missing genotypes, minimum depth of 4,
+# minimum quality of 30
+bcftools +fill-tags ${VCF_P_4}  -- -t 'NMISS=N_MISSING' | \
+bcftools filter -i 'NMISS=0 && FORMAT/DP>=4 && QUAL>=30' -O z -o ${VCF_4X}
+# number of multiallelic variants (1021, 190 SNPs)
+bcftools stats ${VCF_4X} | less
+bcftools query -f '[%GT]\n' ${VCF_4X} | awk '{ gsub(/\./, ""); print }' | grep -Ev '^(.)\1+$' | wc -l # 11373
+
+# restrict to sites with 0 missing genotypes, minimum depth of 5,
+# minimum quality of 30
+bcftools +fill-tags ${VCF_P_4}  -- -t 'NMISS=N_MISSING' | \
+bcftools filter -i 'NMISS=0 && FORMAT/DP>=5 && QUAL>=30' -O z -o ${VCF_5X}
+# number of multiallelic variants (934, 176 SNPs)
+bcftools stats ${VCF_5X} | less
+bcftools query -f '[%GT]\n' ${VCF_5X} | awk '{ gsub(/\./, ""); print }' | grep -Ev '^(.)\1+$' | wc -l # 9895
+```
+
+
+
+Count how many sites overlap at 5x depth of coverage in each bam file; `compared_sites.slurm`.
+```{bash,eval = FALSE}
+#!/bin/bash
+#SBATCH --job-name=GC
+#SBATCH --ntasks=4
+#SBATCH --mem=32GB
+#SBATCH --time=10-12
+#SBATCH --mail-type=END,FAIL,TIME_LIMIT_80,TIME_LIMIT_90
+#SBATCH --mail-user=vaellis@udel.edu
+
+####################################
+## define environmental variables ##
+####################################
+
+## existing directories and files
+START_DIR=/work/vaellis/parus1_swga_methods_final
+HOST_BAM_DIR=${START_DIR}/08_host_bam_mrkdup
+PATH_BAM_DIR=${START_DIR}/09_pathogen_bam_mrkdup
+OUT_DIR=/work/vaellis
+
+#####################
+## Compare overlap ##
+#####################
+
+## host
+for f in ${HOST_BAM_DIR}/*.bam; do
+  file_name=$(basename "$f" .bam)
+  out_name="${OUT_DIR}/$file_name.depth"
+  
+  samtools depth -a -@ 8 "$f" | awk '$3 >= 5' | \
+  awk '{print $1"\t"($2-1)"\t"$2}' > "$out_name"
+  
+  echo "processed $f into $out_name"
+done
+
+bedtools intersect -a 08_2_11_S4_R1_001_val_1.sort.marked_duplicates.rg.depth \
+-b  08_2_12_S5_R1_001_val_1.sort.marked_duplicates.rg.depth \
+08_2_13_S6_R1_001_val_1.sort.marked_duplicates.rg.depth \
+21_2_18_S7_R1_001_val_1.sort.marked_duplicates.rg.depth \
+21_2_20_S8_R1_001_val_1.sort.marked_duplicates.rg.depth \
+21_2_23_S9_R1_001_val_1.sort.marked_duplicates.rg.depth -u | \
+wc -l # [not run...can add if needed]
+
+
+## pathogen (not ideal...I'm just overwriting the depth files...but I'm losing steam)
+for f in ${PATH_BAM_DIR}/*.bam; do
+  file_name=$(basename "$f" .bam)
+  out_name="${OUT_DIR}/$file_name.depth"
+  
+  samtools depth -a -@ 8 "$f" | awk '$3 >= 5' | \
+  awk '{print $1"\t"($2-1)"\t"$2}' > "$out_name"
+  
+  echo "processed $f into $out_name"
+done
+
+bedtools intersect -a 08_2_11_S4_R1_001_val_1.sort.marked_duplicates.rg.depth \
+-b  08_2_12_S5_R1_001_val_1.sort.marked_duplicates.rg.depth \
+08_2_13_S6_R1_001_val_1.sort.marked_duplicates.rg.depth \
+21_2_18_S7_R1_001_val_1.sort.marked_duplicates.rg.depth \
+21_2_20_S8_R1_001_val_1.sort.marked_duplicates.rg.depth \
+21_2_23_S9_R1_001_val_1.sort.marked_duplicates.rg.depth -u | \
+wc -l # 18394 (note that the -u is important; stands for unique A records with an overlap in B)
+
+```
+

@@ -1,0 +1,54 @@
+---
+title: "PARUS1 compare depths of samples"
+author: "Ellis Lab"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Background
+Determine how much of the genome can be compared (i.e., overlaps) between the best sequences. Sample names in order (best sequencing to worst):
+
+* 21_2_18_S7_R1_001_val_1.bam
+* 08_2_13_S6_R1_001_val_1.bam
+* 96_2_5_S3_R1_001_val_1.bam
+* 21_2_20_S8_R1_001_val_1.bam
+
+I will use the metric of how many sites in common with >5x depth of coverage.
+
+### Code
+I will do this in an interactive slurm session with `samtools depth` and some shell script.
+```{bash, eval = FALSE}
+# navigate to correct directory
+cd /work/vaellis/parus1_swga_methods_final/09_pathogen_bam_mrkdup
+
+# calculate positions with depth >=1 in each file, print only the coordinates (remove the depth)
+samtools depth -a 21_2_18_S7_R1_001_val_1.sort.marked_duplicates.rg.bam | awk '$3 >= 1' | awk -v OFS='_' '{print $1, $2}' | sort > 21_2_18.depth
+
+samtools depth -a 08_2_13_S6_R1_001_val_1.sort.marked_duplicates.rg.bam | awk '$3 >= 1' | awk -v OFS='_' '{print $1, $2}' | sort > 08_2_13.depth
+
+samtools depth -a 96_2_5_S3_R1_001_val_1.sort.marked_duplicates.rg.bam | awk '$3 >= 1' | awk -v OFS='_' '{print $1, $2}' | sort > 96_2_5.depth
+
+samtools depth -a 21_2_20_S8_R1_001_val_1.sort.marked_duplicates.rg.bam | awk '$3 >= 1' | awk -v OFS='_' '{print $1, $2}' | sort > 21_2_20.depth
+
+
+# count intersecting sites (note that -12 removes columns of sites unique to each file and leaves the third column which is the intersection)
+# (10,821,340)
+comm -12 21_2_18.depth 08_2_13.depth | wc -l
+# (107,96,511)
+comm -12 21_2_18.depth 96_2_5.depth | wc -l
+# (6,744,534)
+comm -12 21_2_18.depth 21_2_20.depth | wc -l
+# (11,326,060)
+comm -12 08_2_13.depth 96_2_5.depth | wc -l
+# (6,763,035)
+comm -12 08_2_13.depth 21_2_20.depth | wc -l
+# (6,742,138)
+comm -12 96_2_5.depth 21_2_20.depth | wc -l
+
+# count the number of sites with depth >=1
+wc -l 21_2_18.depth # (14,090,382)
+wc -l 08_2_13.depth # (14,646,363)
+wc -l 96_2_5.depth # (14,708,958)
+wc -l 21_2_20.depth # (8,382,767)
+```
+

@@ -1,0 +1,217 @@
+---
+title: "Mapping unamplified PARUS1"
+author: "Ellis Lab"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Background
+This records the pipeline for mapping reads of the following unamplified samples for comparison with their swga versions for the PARUS1 swga methods paper:
+
+* 1EE56066 (swga sample name: 96_2_5)
+* 1EP50341 (swga sample name: 08_2_13)
+* 1HA37672 (swga sample name: 21_2_18)
+* 1EZ96477 (swga sample name: 21_2_23)
+
+These sequences can be found in the file `240626_DN5RC_Ellis.tar` from the UD Sequencing Center (part of a MiSeq Nano run). This document records the code for mapping these samples on BIOMIX.
+
+### Bioinformatics Code
+I will put the sequences in a directory called `/work/vaellis/unamplified_parus1`.
+```{bash, eval=FALSE}
+[vaellis@biomix unamplified_parus1]$ tree
+.
+├── 1EE56066_S27_R1_001.fastq.gz
+├── 1EE56066_S27_R2_001.fastq.gz
+├── 1EP50341_S28_R1_001.fastq.gz
+├── 1EP50341_S28_R2_001.fastq.gz
+├── 1EZ96477_S30_R1_001.fastq.gz
+├── 1EZ96477_S30_R2_001.fastq.gz
+├── 1HA37672_S29_R1_001.fastq.gz
+└── 1HA37672_S29_R2_001.fastq.gz
+
+0 directories, 8 files
+```
+
+Here is the bioinformatics code. I'll save it as `unamplified_mapping.slurm`.
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=unamp_map
+#SBATCH --ntasks=4
+#SBATCH --mem=128GB
+#SBATCH --time=10-12
+#SBATCH --mail-type=END,FAIL,TIME_LIMIT_80,TIME_LIMIT_90
+#SBATCH --mail-user=vaellis@udel.edu
+
+## define environmental variables
+## parallel tasks
+NUM_TASKS=4
+
+## software
+FASTQC="/usr/local/FastQC/fastqc"
+TRIM_GALORE="/usr/local/bin/trim_galore"
+PICARD="java -jar /home/vaellis/packages/picard.jar"
+GATK="/usr/local/gatk/gatk"
+
+## existing directories
+START_DIR=/work/vaellis/unamplified_parus1
+
+SWGA_START_DIR=/work/vaellis/parus1_swga_methods_final
+
+REF_DIR=${SWGA_START_DIR}/reference_genomes
+
+## existing files
+HOST_REF=${REF_DIR}/GCA_030015615.1_cyaCae_Pacbio_Achrs_GRC_genomic.fna
+PATHOGEN_REF=${REF_DIR}/WW2_genome_against_SISKIN1.fasta
+
+## directories to make
+READ_QUAL_DIR=${START_DIR}/01_read_qual_reports
+TRIMMEDQC_READ_DIR=${START_DIR}/02_trimmedQC_reads
+TRIMMEDQC_READ_QUAL_DIR=${START_DIR}/03_trimmedQC_read_qual_reports
+HOST_MAP_BAM_DIR=${START_DIR}/04a_mapped_to_host_bam
+HOST_UNMAPPED_DIR=${START_DIR}/04b_unmapped_to_host_bam
+HOST_MAP_STATS_DIR=${START_DIR}/05_mapped_to_host_stats
+PATHOGEN_MAP_BAM_DIR=${START_DIR}/06_mapped_to_pathogen_bam
+PATHOGEN_MAP_STATS_DIR=${START_DIR}/07_mapped_to_pathogen_stats
+
+##################
+## READ QUALITY ##
+##################
+mkdir -p ${READ_QUAL_DIR}
+
+# run fastqc
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${FASTQC} \
+{} \
+-o ${READ_QUAL_DIR}" ::: \
+${START_DIR}/*.fastq.gz
+
+# run multiqc
+cd ${READ_QUAL_DIR}
+multiqc .
+mv multiqc_report.html original_read_multiqc_report.html
+
+#################
+## TRIM AND QC ##
+#################
+mkdir -p ${TRIMMEDQC_READ_DIR}
+mkdir -p ${TRIMMEDQC_READ_QUAL_DIR}
+
+parallel --link --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${TRIM_GALORE} \
+--length 50 \
+--quality 20 \
+--output_dir ${TRIMMEDQC_READ_DIR} \
+--paired {1} {2}" ::: \
+${START_DIR}/*_R1_* ::: \
+${START_DIR}/*_R2_*
+
+# move read reports to separate directory
+cd ${TRIMMEDQC_READ_DIR}
+mv *_trimming_report.txt ${TRIMMEDQC_READ_QUAL_DIR}
+
+# run fastqc on trimmed reads
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"${FASTQC} \
+{} \
+-o ${TRIMMEDQC_READ_QUAL_DIR}" ::: \
+${TRIMMEDQC_READ_DIR}/*.fq.gz
+
+# run multiqc to summarize
+cd ${TRIMMEDQC_READ_QUAL_DIR}
+multiqc .
+mv multiqc_report.html trimmedqc_read_multiqc_report.html
+
+
+#############
+## MAPPING ##
+#############
+
+mkdir -p ${HOST_MAP_BAM_DIR}
+mkdir -p ${HOST_UNMAPPED_DIR}
+mkdir -p ${HOST_MAP_STATS_DIR}
+mkdir -p ${PATHOGEN_MAP_BAM_DIR}
+mkdir -p ${PATHOGEN_MAP_STATS_DIR}
+
+
+parallel --link --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"bwa mem \
+${HOST_REF} \
+{1} {2} \
+> ${HOST_MAP_BAM_DIR}/{1/.}.sam" ::: \
+${TRIMMEDQC_READ_DIR}/*_R1_* ::: \
+${TRIMMEDQC_READ_DIR}/*_R2_*
+
+# remove .fq from file ending
+cd ${HOST_MAP_BAM_DIR}
+for f in *.fq.sam; do
+mv -- "$f" "${f%%.*}.sam";
+done
+
+# convert sam to bam
+for f in *.sam; do
+  samtools view -b "$f" > "${f%%.*}.bam";
+done
+
+# delete sam
+rm *.sam
+
+# collect mapping stats
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools stats {} \
+> ${HOST_MAP_STATS_DIR}/{/.}.stats.txt" ::: \
+$(find -name '*.bam')
+
+cd ${HOST_MAP_STATS_DIR}
+multiqc .
+mv multiqc_report.html mapped_host_multiqc_report.html
+
+# save unmapped reads as bam
+cd ${HOST_MAP_BAM_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools view -f 4 -b {} \
+> ${HOST_UNMAPPED_DIR}/{/.}.unmapped.bam" ::: \
+$(find -name '*.bam')
+
+# convert to fastq; note this will produce a single file: The output file is suitable for use with bwa mem -p which understands interleaved files containing a mixture of paired and singleton reads.
+cd ${HOST_UNMAPPED_DIR}
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools fastq -0 /dev/null {} \
+> ${HOST_UNMAPPED_DIR}/{/.}.fq" ::: \
+$(find -name '*.unmapped.bam')
+
+# remove the unmapped. from the end of the file name
+cd ${HOST_UNMAPPED_DIR}
+for f in *.unmapped.fq; do
+mv -- "$f" "${f%%.*}.fq";
+done
+
+## map unmapped reads to pathogen ##
+
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"bwa mem \
+-p \
+${PATHOGEN_REF} \
+{} \
+> ${PATHOGEN_MAP_BAM_DIR}/{/.}.sam" ::: \
+$(find -name '*.fq')
+
+# convert sam to bam
+cd ${PATHOGEN_MAP_BAM_DIR}
+for f in *.sam; do
+  samtools view -b "$f" > "${f%%.*}.bam";
+done
+
+# delete sam
+rm *.sam
+
+# collect mapping stats
+parallel --jobs ${NUM_TASKS} --halt soon,fail=1 \
+"samtools stats {} \
+> ${PATHOGEN_MAP_STATS_DIR}/{/.}.stats.txt" ::: \
+$(find -name '*.bam')
+
+cd ${PATHOGEN_MAP_STATS_DIR}
+multiqc .
+mv multiqc_report.html run1_mapped_pathogen_multiqc_report.html
+```
+

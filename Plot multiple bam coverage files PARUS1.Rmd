@@ -1,0 +1,60 @@
+---
+title: "Plot multiple bam coverage files PARUS1"
+author: "Ellis Lab"
+date: "`r Sys.Date()`"
+output: html_document
+---
+### Background
+For the PARUS1 SWGA methods paper, we should report whether the same regions are being amplified across multiple samples. One way to do this is plotting coverage of a particular region or regions of the genome for multiple samples. I will do this with the program `deepTools v.3.5.5` and then plot the output in `R` or even use some of the downstream analyses in `deepTools`.
+
+### Script
+I'll call this `deeptools_coverage.slurm`.
+```{bash, eval=FALSE}
+#!/bin/bash
+#SBATCH --job-name=deeptools
+#SBATCH --ntasks=8
+#SBATCH --mem=256GB
+#SBATCH --time=3-12
+#SBATCH --mail-type=END,FAIL,TIME_LIMIT_80,TIME_LIMIT_90
+#SBATCH --mail-user=vaellis@udel.edu
+
+
+## environmental variables
+NUM_TASKS=8
+
+START_DIR=/work/vaellis/parus1_swga_methods_final
+HOST_BAM_MRKDUP_DIR=${START_DIR}/08_host_bam_mrkdup
+PATHOGEN_BAM_MRKDUP_DIR=${START_DIR}/09_pathogen_bam_mrkdup
+
+
+#####################
+## multiBamSummary ##
+#####################
+
+## 10kb bin sizes by default
+
+## host
+cd ${HOST_BAM_MRKDUP_DIR}
+ls *.bam > bam_files.txt
+multiBamSummary bins -b $(cat bam_files.txt) \
+-o host_summary.npz \
+--outRawCounts host_counts.tsv \
+--labels $(basename -a $(cat bam_files.txt) | sed 's/.bam//') \
+--smartLabels \
+--ignoreDuplicates \
+--minMappingQuality 30 \
+-p ${NUM_TASKS}
+
+## pathogen
+cd ${PATHOGEN_BAM_MRKDUP_DIR}
+ls *.bam > bam_files.txt
+multiBamSummary bins -b $(cat bam_files.txt) \
+-o path_summary.npz \
+--outRawCounts path_counts.tsv \
+--labels $(basename -a $(cat bam_files.txt) | sed 's/.bam//') \
+--smartLabels \
+--ignoreDuplicates \
+--minMappingQuality 30 \
+-p ${NUM_TASKS}
+```
+

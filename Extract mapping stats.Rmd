@@ -1,0 +1,122 @@
+---
+title: "Extracting mapping stats"
+author: "Ellis Lab"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Background
+For the PARUS1 methods paper we mapped to host and pathogen. Here we will extract the depth of coverage at each position in the host and parasite genomes for both Run1 and Run2 using `samtools v.1.19.2`. Then we can analyze and plot in `R v.4.3.2`.
+
+### Code for extracting depth
+I'll call this script, `extract_depth_parus1.slurm`.
+```{bash, eval = FALSE}
+#!/bin/bash
+#SBATCH --job-name=ext_depth
+#SBATCH --ntasks=4
+#SBATCH --mem=256GB
+#SBATCH --time=3-12
+#SBATCH --mail-type=END,FAIL,TIME_LIMIT_80,TIME_LIMIT_90
+#SBATCH --mail-user=vaellis@udel.edu
+
+## define environmental variables
+
+## existing directories
+START_DIR=/work/vaellis/parus1_swga_methods_final
+
+HOST_MAP_BAM_DIR=${START_DIR}/04a_mapped_to_host_bam
+RUN1_HOST_MAP_BAM_DIR=${HOST_MAP_BAM_DIR}/run1
+RUN2_HOST_MAP_BAM_DIR=${HOST_MAP_BAM_DIR}/run2
+
+HOST_MAP_STATS_DIR=${START_DIR}/05_mapped_to_host_stats
+RUN1_HOST_MAP_STATS_DIR=${HOST_MAP_STATS_DIR}/run1
+RUN2_HOST_MAP_STATS_DIR=${HOST_MAP_STATS_DIR}/run2
+
+PATHOGEN_MAP_BAM_DIR=${START_DIR}/06_mapped_to_pathogen_bam
+RUN1_PATHOGEN_MAP_BAM_DIR=${PATHOGEN_MAP_BAM_DIR}/run1
+RUN2_PATHOGEN_MAP_BAM_DIR=${PATHOGEN_MAP_BAM_DIR}/run2
+
+PATHOGEN_MAP_STATS_DIR=${START_DIR}/07_mapped_to_pathogen_stats
+RUN1_PATHOGEN_MAP_STATS_DIR=${PATHOGEN_MAP_STATS_DIR}/run1
+RUN2_PATHOGEN_MAP_STATS_DIR=${PATHOGEN_MAP_STATS_DIR}/run2
+
+## make new directories to save results
+MAP_STATS=/work/vaellis/map_stats_parus1_final
+HOST_MAP=${MAP_STATS}/01_host_map
+HOST_MAP_1=${HOST_MAP}/run1
+HOST_MAP_2=${HOST_MAP}/run2
+PATHOGEN_MAP=${MAP_STATS}/02_pathogen_map
+PATHOGEN_MAP_1=${PATHOGEN_MAP}/run1
+PATHOGEN_MAP_2=${PATHOGEN_MAP}/run2
+
+mkdir -p ${MAP_STATS}
+mkdir -p ${HOST_MAP}
+mkdir -p ${HOST_MAP_1}
+mkdir -p ${HOST_MAP_2}
+mkdir -p ${PATHOGEN_MAP}
+mkdir -p ${PATHOGEN_MAP_1}
+mkdir -p ${PATHOGEN_MAP_2}
+
+#############################################################################################
+## extract read number, mean/sd depth, and proportion of sites with depth > 0 per bam file ##
+#############################################################################################
+
+## host run 1
+
+host_reads1_out=${HOST_MAP_1}/host1_map_mod.tsv
+
+# Header for the TSV file
+echo -e "SampleID\tMappedReadCount\tMean_Depth\tSD_Depth\tProp" > ${host_reads1_out}
+
+# Iterate over each BAM file in the directory
+for f in ${RUN1_HOST_MAP_BAM_DIR}/*.bam; do
+  SAMPLE_ID=$(basename "$f")
+  READ_COUNT=$(samtools view -c -F 0x4 "$f")
+  DEPTH=$(samtools sort -o - "$f" | samtools depth -a - | awk '{sum+=$3; sumsq+=$3*$3; n++; if ($3 > 0) pos_count++} END {mean=sum/n; sd=sqrt((sumsq-sum*sum/n)/(n-1)); prop_pos=pos_count/n; printf "%.10f\t%.10f\t%.10f\n", mean, sd, prop_pos}')
+  echo -e "${SAMPLE_ID}\t${READ_COUNT}\t${DEPTH}" >> "${host_reads1_out}"
+done
+
+## host run 2
+host_reads2_out=${HOST_MAP_2}/host2_map_mod.tsv
+
+# Header for the TSV file
+echo -e "SampleID\tMappedReadCount\tMean_Depth\tSD_Depth\tProp" > ${host_reads2_out}
+
+# Iterate over each BAM file in the directory
+for f in ${RUN2_HOST_MAP_BAM_DIR}/*.bam; do
+  SAMPLE_ID=$(basename "$f")
+  READ_COUNT=$(samtools view -c -F 0x4 "$f")
+  DEPTH=$(samtools sort -o - "$f" | samtools depth -a - | awk '{sum+=$3; sumsq+=$3*$3; n++; if ($3 > 0) pos_count++} END {mean=sum/n; sd=sqrt((sumsq-sum*sum/n)/(n-1)); prop_pos=pos_count/n; printf "%.10f\t%.10f\t%.10f\n", mean, sd, prop_pos}')
+  echo -e "${SAMPLE_ID}\t${READ_COUNT}\t${DEPTH}" >> "${host_reads2_out}"
+done
+
+## pathogen run 1
+path_reads1_out=${PATHOGEN_MAP_1}/path1_map_mod.tsv
+
+# Header for the TSV file
+echo -e "SampleID\tMappedReadCount\tMean_Depth\tSD_Depth\tProp" > ${path_reads1_out}
+
+# Iterate over each BAM file in the directory
+for f in ${RUN1_PATHOGEN_MAP_BAM_DIR}/*.bam; do
+  SAMPLE_ID=$(basename "$f")
+  READ_COUNT=$(samtools view -c -F 0x4 "$f")
+  DEPTH=$(samtools sort -o - "$f" | samtools depth -a - | awk '{sum+=$3; sumsq+=$3*$3; n++; if ($3 > 0) pos_count++} END {mean=sum/n; sd=sqrt((sumsq-sum*sum/n)/(n-1)); prop_pos=pos_count/n; printf "%.10f\t%.10f\t%.10f\n", mean, sd, prop_pos}')
+  echo -e "${SAMPLE_ID}\t${READ_COUNT}\t${DEPTH}" >> "${path_reads1_out}"
+done
+
+## pathogen run 2
+path_reads2_out=${PATHOGEN_MAP_2}/path2_map_mod.tsv
+
+# Header for the TSV file
+echo -e "SampleID\tMappedReadCount\tMean_Depth\tSD_Depth\tProp" > ${path_reads2_out}
+
+# Iterate over each BAM file in the directory
+for f in ${RUN2_PATHOGEN_MAP_BAM_DIR}/*.bam; do
+  SAMPLE_ID=$(basename "$f")
+  READ_COUNT=$(samtools view -c -F 0x4 "$f")
+  DEPTH=$(samtools sort -o - "$f" | samtools depth -a - | awk '{sum+=$3; sumsq+=$3*$3; n++; if ($3 > 0) pos_count++} END {mean=sum/n; sd=sqrt((sumsq-sum*sum/n)/(n-1)); prop_pos=pos_count/n; printf "%.10f\t%.10f\t%.10f\n", mean, sd, prop_pos}')
+  echo -e "${SAMPLE_ID}\t${READ_COUNT}\t${DEPTH}" >> "${path_reads2_out}"
+done
+```
+
+
